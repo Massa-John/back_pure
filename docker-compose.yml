@@ -5,14 +5,39 @@ services:
       - "8080:8080"
     environment:
       JWT_SECRET: ${JWT_SECRET:-dev-secret}
-      POSTGRES_DSN: postgres://postgres:postgres@postgres:5432/messenger?sslmode=disable
-      REDIS_ADDR: baza-redis:6379
-      CORS_ORIGIN: ${CORS_ORIGIN:-127.0.0.1}
-    networks:
-      - infra
+      POSTGRES_DSN: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/messenger?sslmode=disable
+      REDIS_ADDR: redis:6379
+      CORS_ORIGIN: ${CORS_ORIGIN:-*}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     restart: unless-stopped
 
-networks:
-  infra:
-    external: true
-    name: ve13_app-network
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: messenger
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d messenger"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
