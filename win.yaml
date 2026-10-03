@@ -1,0 +1,722 @@
+openapi: 3.0.0
+info:
+  title: back_pure Messenger API
+  description: REST + WebSocket backend для мессенджера. PostgreSQL + Redis.
+  version: 1.0.0
+servers:
+  - url: http://localhost:8080
+    description: Default (docker-compose)
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT access token в заголовке Authorization
+
+  schemas:
+    User:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        login:
+          type: string
+          minLength: 3
+          maxLength: 32
+          pattern: '^[a-z]+$'
+        online:
+          type: boolean
+      required: [id, login, online]
+      example:
+        id: 1
+        login: alice
+        online: true
+
+    Message:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        chat_id:
+          type: integer
+          format: int64
+        sender_id:
+          type: integer
+          format: int64
+        body:
+          type: string
+          minLength: 1
+          maxLength: 4000
+        created_at:
+          type: string
+          format: date-time
+      required: [id, chat_id, sender_id, body, created_at]
+      example:
+        id: 10
+        chat_id: 1
+        sender_id: 1
+        body: hello
+        created_at: "2026-10-03T14:00:00Z"
+
+    ChatItem:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        peer:
+          $ref: '#/components/schemas/User'
+        last_message:
+          $ref: '#/components/schemas/Message'
+          nullable: true
+      required: [id, peer]
+      example:
+        id: 1
+        peer:
+          id: 2
+          login: bob
+          online: true
+        last_message:
+          id: 10
+          chat_id: 1
+          sender_id: 2
+          body: bye
+          created_at: "2026-10-03T14:30:00Z"
+
+    TokenPair:
+      type: object
+      properties:
+        access_token:
+          type: string
+          description: JWT токен, живёт 15 минут (ACCESS_TTL)
+        refresh_token:
+          type: string
+          description: One-time refresh токен, живёт 30 дней (REFRESH_TTL)
+        expires_in:
+          type: integer
+          description: Время жизни access_token в секундах
+        user:
+          $ref: '#/components/schemas/User'
+      required: [access_token, refresh_token, expires_in, user]
+      example:
+        access_token: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+        refresh_token: "a1b2c3d4e5f6..."
+        expires_in: 900
+        user:
+          id: 1
+          login: alice
+          online: false
+
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+      required: [error]
+      example:
+        error: unauthorized
+
+    HealthStatus:
+      type: object
+      properties:
+        status:
+          type: string
+      example:
+        status: ok
+
+  responses:
+    Unauthorized:
+      description: Токен отсутствует, невалиден, истёк или отозван
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            missing:
+              value:
+                error: unauthorized
+            invalid:
+              value:
+                error: invalid or expired token
+            revoked:
+              value:
+                error: token revoked
+
+    NotFound:
+      description: Ресурс не найден
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+    BadRequest:
+      description: Ошибка валидации входных данных
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+    Conflict:
+      description: Конфликт (например, логин занят)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+    InternalError:
+      description: Ошибка сервера
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+paths:
+  /healthz:
+    get:
+      tags: [Health]
+      summary: Проверка здоровья сервера
+      operationId: getHealth
+      responses:
+        '200':
+          description: Сервер работает
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthStatus'
+
+  /api/auth/register:
+    post:
+      tags: [Auth]
+      summary: Регистрация нового пользователя
+      operationId: register
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                login:
+                  type: string
+                  minLength: 3
+                  maxLength: 32
+                  pattern: '^[a-z]+$'
+                  description: Логин (только a-z, 3-32 символа)
+                password:
+                  type: string
+                  minLength: 6
+                  maxLength: 72
+                  description: Пароль (6-72 символа)
+              required: [login, password]
+            example:
+              login: alice
+              password: password123
+      responses:
+        '201':
+          description: Успешная регистрация
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenPair'
+        '400':
+          description: Неверный формат логина или пароля
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Логин уже занят
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: login is already taken
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/auth/login:
+    post:
+      tags: [Auth]
+      summary: Вход пользователя
+      operationId: login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                login:
+                  type: string
+                password:
+                  type: string
+              required: [login, password]
+            example:
+              login: alice
+              password: password123
+      responses:
+        '200':
+          description: Успешный вход
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenPair'
+        '401':
+          description: Неверный логин или пароль
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: invalid login or password
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Обновление токенов (ротация refresh-токена)
+      operationId: refresh
+      description: Refresh-токен одноразовый. После успешного запроса выдаётся новая пара токенов.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                refresh_token:
+                  type: string
+                  description: Текущий refresh-токен
+              required: [refresh_token]
+            example:
+              refresh_token: a1b2c3d4e5f6...
+      responses:
+        '200':
+          description: Новая пара токенов
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenPair'
+        '401':
+          description: Невалидный или истёкший refresh-токен
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: invalid refresh token
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/auth/logout:
+    post:
+      tags: [Auth]
+      summary: Выход пользователя
+      operationId: logout
+      security:
+        - BearerAuth: []
+      description: Добавляет access-токен в чёрный список до истечения. Опционально удаляет refresh-токен.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                refresh_token:
+                  type: string
+                  description: Опционально, refresh-токен для удаления
+            example:
+              refresh_token: a1b2c3d4e5f6...
+      responses:
+        '204':
+          description: Успешный выход
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/me:
+    get:
+      tags: [Users]
+      summary: Получить текущего пользователя
+      operationId: getMe
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Данные текущего пользователя
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Пользователь не найден (маловероятно)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/users/search:
+    get:
+      tags: [Users]
+      summary: Поиск пользователей по префиксу логина
+      operationId: searchUsers
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 32
+            pattern: '^[a-z]+$'
+          description: Префикс логина для поиска
+          example: al
+      responses:
+        '200':
+          description: Список найденных пользователей (до 20, исключая себя)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/User'
+              example:
+                - id: 2
+                  login: alice
+                  online: true
+                - id: 3
+                  login: alex
+                  online: false
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/chats:
+    get:
+      tags: [Chats]
+      summary: Список чатов текущего пользователя
+      operationId: listChats
+      security:
+        - BearerAuth: []
+      description: Возвращает до 100 чатов, отсортированные по последней активности (убывание).
+      responses:
+        '200':
+          description: Список чатов
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ChatItem'
+              example:
+                - id: 1
+                  peer:
+                    id: 2
+                    login: bob
+                    online: true
+                  last_message:
+                    id: 10
+                    chat_id: 1
+                    sender_id: 1
+                    body: hey
+                    created_at: "2026-10-03T14:00:00Z"
+                - id: 2
+                  peer:
+                    id: 3
+                    login: charlie
+                    online: false
+                  last_message: null
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+    post:
+      tags: [Chats]
+      summary: Создать или получить диалог с пользователем
+      operationId: createChat
+      security:
+        - BearerAuth: []
+      description: Если диалог уже существует, возвращает его. Иначе создаёт новый.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                login:
+                  type: string
+                  description: Логин собеседника
+              required: [login]
+            example:
+              login: bob
+      responses:
+        '200':
+          description: Чат (новый или существующий)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatItem'
+        '400':
+          description: Нельзя создать чат с самим собой
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: cannot create chat with yourself
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Пользователь не найден
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: user not found
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/chats/{id}/messages:
+    get:
+      tags: [Messages]
+      summary: Получить историю сообщений чата
+      operationId: getMessages
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+          description: ID чата
+        - name: before
+          in: query
+          schema:
+            type: integer
+            format: int64
+            default: 0
+          description: Курсор для пагинации (ID последнего загруженного сообщения). 0 = с конца
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+          description: Количество сообщений (1-100)
+      responses:
+        '200':
+          description: Сообщения в хронологическом порядке
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Message'
+              example:
+                - id: 5
+                  chat_id: 1
+                  sender_id: 2
+                  body: hi
+                  created_at: "2026-10-03T14:00:00Z"
+                - id: 10
+                  chat_id: 1
+                  sender_id: 1
+                  body: hello
+                  created_at: "2026-10-03T14:00:10Z"
+        '400':
+          description: Неверный формат ID чата
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: bad chat id
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Чат не найден или пользователь не является участником
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: chat not found
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+    post:
+      tags: [Messages]
+      summary: Отправить сообщение в чат
+      operationId: postMessage
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+          description: ID чата
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                body:
+                  type: string
+                  minLength: 1
+                  maxLength: 4000
+                  description: Текст сообщения
+              required: [body]
+            example:
+              body: hello world
+      responses:
+        '201':
+          description: Сообщение создано. События WebSocket также будут отправлены всем подписчикам.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Message'
+        '400':
+          description: Пустое или слишком длинное сообщение
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: message must be 1-4000 characters
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Чат не найден или пользователь не является участником
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: chat not found
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/messages/{id}:
+    delete:
+      tags: [Messages]
+      summary: Удалить сообщение (soft delete)
+      operationId: deleteMessage
+      security:
+        - BearerAuth: []
+      description: Удалить можно только собственное сообщение. Сообщение помечается как удалённое (deleted_at), но остаётся в БД.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+          description: ID сообщения
+      responses:
+        '204':
+          description: Сообщение удалено. WebSocket-событие message.deleted отправлено участникам.
+        '400':
+          description: Неверный формат ID
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: bad message id
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Сообщение не найдено или не принадлежит текущему пользователю
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: message not found
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/ws:
+    get:
+      tags: [WebSocket]
+      summary: WebSocket соединение
+      operationId: serveWS
+      security:
+        - BearerAuth: []
+      description: |
+        Апгрейд до WebSocket. Токен передаётся через query-параметр `token` вместо заголовка.
+        
+        **Клиент → Сервер:**
+        - `{"type":"ping","data":null}` — проверка соединения
+        - `{"type":"message.send","data":{"chat_id":1,"body":"hello"}}` — отправка сообщения
+        
+        **Сервер → Клиент:**
+        - `{"type":"pong","data":null}` — ответ на ping
+        - `{"type":"message.new","data":{Message}}` — новое сообщение (для обоих участников)
+        - `{"type":"message.deleted","data":{"id":10,"chat_id":1}}` — сообщение удалено
+        - `{"type":"presence","data":{"user_id":2,"online":true}}` — смена статуса (собеседникам)
+        - `{"type":"error","data":{"error":"..."}}` — ошибка
+        
+        **Технические параметры:**
+        - Сервер отправляет ping каждые 25 секунд
+        - Таймаут на клиент: 60 секунд без активности
+        - Максимальный размер входящего сообщения: 16 КБ
+        - Presence-статус кэшируется в Redis с TTL 2 минуты (скользящее окно)
+      parameters:
+        - name: token
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Access-токен (вместо заголовка Authorization)
+      responses:
+        '101':
+          description: Успешный апгрейд к WebSocket
+        '400':
+          description: Неверный запрос
+        '401':
+          description: Невалидный или отсутствующий токен
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+security:
+  - BearerAuth: []
+
+tags:
+  - name: Health
+    description: Проверка здоровья сервера
+  - name: Auth
+    description: Аутентификация и управление токенами
+  - name: Users
+    description: Профиль и поиск пользователей
+  - name: Chats
+    description: Чаты и диалоги
+  - name: Messages
+    description: Сообщения и история
+  - name: WebSocket
+    description: Real-time события по WebSocket
