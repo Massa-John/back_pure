@@ -7,7 +7,7 @@ services:
       JWT_SECRET: ${JWT_SECRET:-dev-secret}
       POSTGRES_DSN: postgres://postgres:postgres@postgres:5432/messenger?sslmode=disable
       REDIS_ADDR: baza-redis:6379
-      CORS_ORIGIN: ${CORS_ORIGIN:-*}
+      CORS_ORIGIN: ${CORS_ORIGIN:-127.0.0.1}
     networks:
       - infra
     restart: unless-stopped
